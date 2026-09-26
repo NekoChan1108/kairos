@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - 'staging/src/kairos.io/apis/**'
+
   # Allow manual trigger
   workflow_dispatch:
     inputs:
@@ -23,26 +24,40 @@ permissions:
 jobs:
   sync-apis:
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
       pull-requests: write
+
     steps:
+      # ============================================================
+      # Checkout kairos repository
+      # ============================================================
       - name: Checkout kairos repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
+      # ============================================================
+      # Set variables
+      # ============================================================
       - name: Set up variables
         id: vars
+        shell: bash
         run: |
           SOURCE_BRANCH="${GITHUB_REF_NAME}"
           TARGET_BRANCH="${{ github.event.inputs.target_branch || github.ref_name }}"
+
           COMMIT_MSG=$(git log -1 --pretty=format:'%s')
           COMMIT_BODY=$(git log -1 --pretty=format:'%b')
           FULL_COMMIT="${COMMIT_MSG}${COMMIT_BODY}"
 
           PR_NUMBER=""
-          if echo "${FULL_COMMIT}" | grep -oE '#[0-9]+' | head -1 | grep -oE '[0-9]+' > /tmp/pr_num.txt; then
+
+          if echo "${FULL_COMMIT}" \
+            | grep -oE '#[0-9]+' \
+            | head -1 \
+            | grep -oE '[0-9]+' > /tmp/pr_num.txt; then
             PR_NUMBER=$(cat /tmp/pr_num.txt)
           fi
 
@@ -55,65 +70,94 @@ jobs:
             echo "pr_number=${PR_NUMBER}"
           } >> "$GITHUB_OUTPUT"
 
+      # ============================================================
+      # Checkout kairos-apis repository
+      # ============================================================
       - name: Checkout apis repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.APIS_REPO }}
+          token: ${{ secrets.APIS_REPO_TOKEN }}
           ref: ${{ steps.vars.outputs.target_branch }}
           path: apis-repo
           fetch-depth: 0
 
+      # ============================================================
+      # Sync APIs
+      # ============================================================
       - name: Sync APIs
         id: sync
         env:
           APIS_REPO_DIR: ${{ github.workspace }}/apis-repo
+        shell: bash
         run: |
           if ./hack/sync-apis.sh sync \
-            --target-branch "${{ steps.vars.outputs.target_branch }}" 2>&1 | tee /tmp/sync-output.log; then
+            --target-branch "${{ steps.vars.outputs.target_branch }}" \
+            2>&1 | tee /tmp/sync-output.log; then
+
             if grep -q "SYNC_RESULT=success" /tmp/sync-output.log; then
               echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
             elif grep -q "SYNC_RESULT=no_changes" /tmp/sync-output.log; then
               echo "has_changes=false" >> "$GITHUB_OUTPUT"
+
             else
               echo "has_changes=unknown" >> "$GITHUB_OUTPUT"
             fi
+
           else
             echo "::error::Sync script failed"
             exit 1
           fi
 
+      # ============================================================
+      # Prepare PR body
+      # ============================================================
       - name: Prepare PR body
         id: pr_body
         if: steps.sync.outputs.has_changes == 'true'
+        shell: bash
         run: |
           if [ -n "${{ steps.vars.outputs.pr_number }}" ]; then
             PR_ROW="| PR | [#${{ steps.vars.outputs.pr_number }}](https://github.com/NekoChan1108/kairos/pull/${{ steps.vars.outputs.pr_number }}) |"
           else
             PR_ROW="| PR | N/A |"
           fi
+
           echo "pr_row=${PR_ROW}" >> "$GITHUB_OUTPUT"
 
+      # ============================================================
+      # Create Pull Request
+      # ============================================================
       - name: Create Pull Request
         if: steps.sync.outputs.has_changes == 'true'
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.APIS_REPO_TOKEN }}
           repository: ${{ env.APIS_REPO }}
           path: apis-repo
+
           author: Kairos Bot <kairos-bot@users.noreply.github.com>
           committer: Kairos Bot <kairos-bot@users.noreply.github.com>
+
           commit-message: |
             Sync from NekoChan1108/kairos@${{ steps.vars.outputs.sha_short }}
+
             Original commit: ${{ steps.vars.outputs.commit_msg }}
+
             Automated sync from staging directory.
+
             Source: https://github.com/NekoChan1108/kairos/commit/${{ steps.vars.outputs.sha }}
+
           title: "Sync APIs from NekoChan1108/kairos@${{ steps.vars.outputs.sha_short }}"
+
           body: |
             ## Automated API Sync
 
             This PR was automatically created to sync API changes from the main kairos repository.
 
             ### Source Information
+
             | Item | Value |
             |------|-------|
             | Repository | NekoChan1108/kairos |
@@ -122,6 +166,7 @@ jobs:
             ${{ steps.pr_body.outputs.pr_row }}
 
             ### Triggered by
+
             | Item | Value |
             |------|-------|
             | Actor | @${{ github.actor }} |
@@ -129,12 +174,17 @@ jobs:
             | Run | [#${{ github.run_number }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
 
             > This PR was generated by [sync-apis workflow](https://github.com/NekoChan1108/kairos/blob/${{ steps.vars.outputs.source_branch }}/.github/workflows/sync-apis.yaml)
+
           branch: "sync-${{ steps.vars.outputs.sha_short }}"
           base: ${{ steps.vars.outputs.target_branch }}
           delete-branch: true
 
+      # ============================================================
+      # Summary
+      # ============================================================
       - name: Summary
         if: always()
+        shell: bash
         run: |
           {
             echo "## Sync APIs Summary"
@@ -144,9 +194,12 @@ jobs:
             echo "| Source | \`NekoChan1108/kairos@${{ steps.vars.outputs.sha_short }}\` |"
             echo "| Target | \`${{ env.APIS_REPO }}:${{ steps.vars.outputs.target_branch }}\` |"
             echo ""
+
             if [ "${{ steps.sync.outputs.has_changes }}" == "true" ]; then
               echo "### ✅ Result: Changes synced and PR created"
-            else
+            elif [ "${{ steps.sync.outputs.has_changes }}" == "false" ]; then
               echo "### ℹ️ Result: No changes to sync"
+            else
+              echo "### ⚠️ Result: Sync result unknown"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
